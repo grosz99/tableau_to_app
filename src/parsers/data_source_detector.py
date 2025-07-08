@@ -59,7 +59,7 @@ class DataSourceDetector:
         return detected_sources
     
     def _get_unique_sources(self, datasources: List[Dict]) -> List[Dict]:
-        """Remove duplicate data source entries"""
+        """Remove duplicate data source entries and filter out non-data sources"""
         
         unique_sources = []
         seen_names = set()
@@ -70,13 +70,40 @@ class DataSourceDetector:
             
             # Skip parameters
             if name == 'Parameters' or caption == 'Parameters':
+                logger.debug(f"Skipping parameters datasource: {name}")
+                continue
+            
+            # Skip empty names/captions
+            if not name and not caption:
+                logger.debug("Skipping datasource with empty name and caption")
+                continue
+                
+            # Skip if no connections (likely a reference, not actual datasource)
+            if not ds.get('connections'):
+                logger.debug(f"Skipping datasource without connections: {name}")
                 continue
             
             # Skip duplicates (same name/caption combo)
             key = f"{name}_{caption}"
-            if key not in seen_names and ds.get('connections'):
+            if key in seen_names:
+                logger.debug(f"Skipping duplicate datasource: {name}")
+                continue
+                
+            # Check if connections have meaningful content
+            valid_connections = []
+            for conn in ds.get('connections', []):
+                conn_class = conn.get('class', '')
+                if conn_class and conn_class != 'genericodbc':  # Skip generic empty connections
+                    valid_connections.append(conn)
+            
+            if valid_connections:
+                # Update datasource with only valid connections
+                ds['connections'] = valid_connections
                 seen_names.add(key)
                 unique_sources.append(ds)
+                logger.info(f"Added unique datasource: {caption or name} ({len(valid_connections)} connections)")
+            else:
+                logger.debug(f"Skipping datasource with no valid connections: {name}")
         
         return unique_sources
     

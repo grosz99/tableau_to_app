@@ -14,6 +14,7 @@ import traceback
 
 # Import our modules
 from src.parsers.twbx_parser import TWBXParser, WorkbookStructure
+from src.parsers.data_source_detector import DataSourceDetector
 from src.translators.formula_translator import TableauFormulaTranslator
 from src.validation.snowflake_validator import SnowflakeValidator, SuperstoreMetrics
 from src.agents.extraction_agent import ExtractionAgent
@@ -253,8 +254,13 @@ def process_workbook(twbx_file, data_file, reference_image, validate_data):
             # Parse workbook
             workbook_structure = parser.parse(str(temp_path))
             
+            # Detect actual data sources (not just raw XML entries)
+            detector = DataSourceDetector()
+            detected_sources = detector.detect_data_sources(workbook_structure)
+            
             # Store in session state
             st.session_state.workbook_structure = workbook_structure
+            st.session_state.detected_data_sources = detected_sources
             
             # Clean up
             temp_path.unlink()
@@ -291,7 +297,9 @@ def process_workbook(twbx_file, data_file, reference_image, validate_data):
         with col3:
             st.metric("Calculations", len(workbook_structure.calculations))
         with col4:
-            st.metric("Data Sources", len(workbook_structure.datasources))
+            # Use detected data sources count instead of raw datasources count
+            detected_count = len(st.session_state.get('detected_data_sources', []))
+            st.metric("Data Sources", detected_count)
         
     except Exception as e:
         st.error(f"❌ Error processing workbook: {str(e)}")
@@ -359,6 +367,45 @@ def display_analysis_results(workbook: WorkbookStructure):
                 for mark in worksheet.marks:
                     st.write(f"• {mark.get('class', 'Unknown')} chart")
     
+    # Data Sources section
+    st.subheader("🗃️ Data Sources")
+    
+    if 'detected_data_sources' in st.session_state:
+        detected_sources = st.session_state.detected_data_sources
+        
+        if detected_sources:
+            for i, source in enumerate(detected_sources, 1):
+                with st.expander(f"📊 {source.caption} ({'Primary' if source.is_primary else 'Secondary'})"):
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("**Connection Details:**")
+                        st.write(f"• **Type**: {source.connection_type}")
+                        st.write(f"• **Name**: {source.name}")
+                        if source.embedded_file:
+                            st.write(f"• **File**: {source.embedded_file}")
+                        
+                        # Show connection details
+                        for key, value in source.connection_details.items():
+                            if value and key not in ['class']:
+                                st.write(f"• **{key.title()}**: {value}")
+                    
+                    with col2:
+                        st.markdown("**Usage:**")
+                        st.write(f"• **Worksheets**: {len(source.worksheets_using)}")
+                        st.write(f"• **Primary Source**: {'Yes' if source.is_primary else 'No'}")
+                        
+                        if source.worksheets_using:
+                            st.markdown("**Used in:**")
+                            for worksheet in source.worksheets_using[:5]:  # Show first 5
+                                st.write(f"  - {worksheet}")
+                            if len(source.worksheets_using) > 5:
+                                st.write(f"  ... and {len(source.worksheets_using) - 5} more")
+        else:
+            st.info("No data sources detected in this workbook.")
+    else:
+        st.info("Data source detection not yet performed. Upload and analyze a workbook first.")
+
     # Dashboards section
     st.subheader("📱 Dashboards")
     

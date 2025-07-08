@@ -124,14 +124,26 @@ class TWBXParser:
         return metadata
     
     def _extract_datasources(self, root: ET.Element) -> List[Dict[str, Any]]:
-        """Extract datasource information"""
+        """Extract datasource information with basic deduplication"""
         datasources = []
+        seen_datasources = set()
         
         for ds in root.findall('.//datasource'):
+            name = ds.get('name', '')
+            caption = ds.get('caption', '')
+            inline = ds.get('inline', 'false') == 'true'
+            
+            # Create unique key for this datasource
+            datasource_key = f"{name}_{caption}_{inline}"
+            
+            # Skip if we've already seen this exact datasource
+            if datasource_key in seen_datasources:
+                continue
+                
             datasource = {
-                'name': ds.get('name', ''),
-                'caption': ds.get('caption', ''),
-                'inline': ds.get('inline', 'false') == 'true',
+                'name': name,
+                'caption': caption,
+                'inline': inline,
                 'connections': [],
                 'columns': []
             }
@@ -158,7 +170,10 @@ class TWBXParser:
                 }
                 datasource['columns'].append(column)
             
-            datasources.append(datasource)
+            # Only add datasources that have connections or are inline with columns
+            if datasource['connections'] or (datasource['inline'] and datasource['columns']):
+                datasources.append(datasource)
+                seen_datasources.add(datasource_key)
         
         return datasources
     
