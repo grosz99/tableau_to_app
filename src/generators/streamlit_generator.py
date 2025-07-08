@@ -269,13 +269,14 @@ class FilterManager:
                     workbook_structure: Any,
                     chart_library: str = "plotly",
                     theme: str = "default",
-                    translated_formulas: Optional[Dict[str, Any]] = None) -> GeneratedApp:
+                    translated_formulas: Optional[Dict[str, Any]] = None,
+                    field_mapper: Optional[Any] = None) -> GeneratedApp:
         """Generate complete Streamlit application"""
         
         logger.info("Generating Streamlit application...")
         
         # Extract dashboard information
-        dashboard_info = self._extract_dashboard_info(workbook_structure, translated_formulas)
+        dashboard_info = self._extract_dashboard_info(workbook_structure, translated_formulas, field_mapper)
         
         # Generate main app file
         main_file = self._generate_main_file(dashboard_info, chart_library, theme)
@@ -301,7 +302,7 @@ class FilterManager:
             documentation=documentation
         )
     
-    def _extract_dashboard_info(self, workbook_structure: Any, translated_formulas: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _extract_dashboard_info(self, workbook_structure: Any, translated_formulas: Optional[Dict[str, Any]] = None, field_mapper: Optional[Any] = None) -> Dict[str, Any]:
         """Extract dashboard information from workbook structure"""
         
         # Get first dashboard (assuming single dashboard for now)
@@ -332,13 +333,21 @@ class FilterManager:
                     python_code = f"result = {python_code}"
             else:
                 # Fallback to a basic implementation
-                python_code = self._generate_fallback_calculation(calc)
+                python_code = self._generate_fallback_calculation(calc, field_mapper)
+            
+            # Use field mapper for proper naming if available
+            if field_mapper:
+                python_name = field_mapper.get_python_name_for_field(calc_name)
+                display_name = field_mapper.get_display_label_for_field(calc_name)
+            else:
+                python_name = calc_name.replace(' ', '_').replace('-', '_').lower()
+                display_name = calc_name
             
             calculations.append({
-                'name': calc_name.replace(' ', '_').replace('-', '_').lower(),
-                'display_name': calc_name,
+                'name': python_name,
+                'display_name': display_name,
                 'original_formula': calc.formula,
-                'description': f"Calculation for {calc_name}",
+                'description': f"Calculation for {display_name}",
                 'python_code': python_code,
                 'dependencies': calc.dependencies
             })
@@ -356,11 +365,12 @@ class FilterManager:
         for calc in calculations[:4]:  # Take first 4 calculations as key metrics
             metric_count += 1
             # Determine format based on calculation name
-            if 'profit' in calc['display_name'].lower() and 'margin' in calc['display_name'].lower():
+            display_name_lower = calc['display_name'].lower()
+            if 'profit' in display_name_lower and 'margin' in display_name_lower:
                 format_str = '{:.1%}'
-            elif 'count' in calc['display_name'].lower() or 'quantity' in calc['display_name'].lower():
+            elif 'count' in display_name_lower or 'quantity' in display_name_lower:
                 format_str = '{:,.0f}'
-            elif 'sales' in calc['display_name'].lower() or 'profit' in calc['display_name'].lower() or 'revenue' in calc['display_name'].lower():
+            elif 'sales' in display_name_lower or 'profit' in display_name_lower or 'revenue' in display_name_lower:
                 format_str = '${:,.0f}'
             else:
                 format_str = '{:,.2f}'
@@ -392,33 +402,47 @@ class FilterManager:
             'data_query': self._generate_data_query(workbook_structure)
         }
     
-    def _generate_fallback_calculation(self, calc: Any) -> str:
+    def _generate_fallback_calculation(self, calc: Any, field_mapper: Optional[Any] = None) -> str:
         """Generate fallback calculation when translation is not available"""
         # Try to generate a basic Python implementation based on common patterns
         formula = calc.formula.upper()
         
+        def get_column_name(field_name: str) -> str:
+            """Get proper column name, using field mapper if available"""
+            clean_field = field_name.strip('[]"')
+            if field_mapper:
+                return field_mapper.get_python_name_for_field(clean_field)
+            return clean_field
+        
         if 'SUM(' in formula:
             field = calc.formula[calc.formula.find('(')+1:calc.formula.rfind(')')].strip('[]"')
-            return f"result = data['{field}'].sum()"
+            col_name = get_column_name(field)
+            return f"result = data['{col_name}'].sum()"
         elif 'AVG(' in formula or 'AVERAGE(' in formula:
             field = calc.formula[calc.formula.find('(')+1:calc.formula.rfind(')')].strip('[]"')
-            return f"result = data['{field}'].mean()"
+            col_name = get_column_name(field)
+            return f"result = data['{col_name}'].mean()"
         elif 'COUNT(' in formula:
             field = calc.formula[calc.formula.find('(')+1:calc.formula.rfind(')')].strip('[]"')
-            return f"result = data['{field}'].count()"
+            col_name = get_column_name(field)
+            return f"result = data['{col_name}'].count()"
         elif 'MAX(' in formula:
             field = calc.formula[calc.formula.find('(')+1:calc.formula.rfind(')')].strip('[]"')
-            return f"result = data['{field}'].max()"
+            col_name = get_column_name(field)
+            return f"result = data['{col_name}'].max()"
         elif 'MIN(' in formula:
             field = calc.formula[calc.formula.find('(')+1:calc.formula.rfind(')')].strip('[]"')
-            return f"result = data['{field}'].min()"
+            col_name = get_column_name(field)
+            return f"result = data['{col_name}'].min()"
         elif '/' in formula and calc.calculation_type == 'basic':
             # Handle simple division like profit margin
             parts = calc.formula.split('/')
             if len(parts) == 2:
                 num = parts[0].strip().strip('[]"')
                 den = parts[1].strip().strip('[]"')
-                return f"result = data['{num}'] / data['{den}']"
+                num_col = get_column_name(num)
+                den_col = get_column_name(den)
+                return f"result = data['{num_col}'] / data['{den_col}']"
         else:
             # Default implementation
             return f"# TODO: Implement calculation for: {calc.formula}\n        result = 0"

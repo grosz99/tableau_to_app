@@ -19,6 +19,7 @@ from src.translators.formula_translator import TableauFormulaTranslator
 from src.validation.snowflake_validator import SnowflakeValidator, SuperstoreMetrics
 from src.agents.extraction_agent import ExtractionAgent
 from src.generators.streamlit_generator import StreamlitGenerator
+from src.utils.field_mapper import FieldMapper, FieldMapping
 
 # Configure logging
 logging.basicConfig(
@@ -111,6 +112,7 @@ def main():
         st.info(
             "**Current Prototype (v1.0)**\n\n"
             "✅ **Streamlit Generation**: Extract formulas → Generate Streamlit apps\n"
+            "✅ **Field Mapping**: User-guided field name mapping for Python compatibility\n"
             "✅ **Data Validation**: Optional comparison against Snowflake source data\n"
             "✅ **AI Translation**: Tableau formulas → Python/Pandas\n\n"
             "🚧 **Coming Soon**: React and Tableau output options"
@@ -118,9 +120,9 @@ def main():
     
     # Main content
     if validate_data:
-        tabs = st.tabs(["📁 Upload Files", "🔍 Analysis", "🚀 Generate", "✅ Validation"])
+        tabs = st.tabs(["📁 Upload Files", "🔍 Analysis", "🔧 Field Mapping", "🚀 Generate", "✅ Validation"])
     else:
-        tabs = st.tabs(["📁 Upload Files", "🔍 Analysis", "🚀 Generate"])
+        tabs = st.tabs(["📁 Upload Files", "🔍 Analysis", "🔧 Field Mapping", "🚀 Generate"])
     
     # Tab 1: Upload Files
     with tabs[0]:
@@ -181,9 +183,18 @@ def main():
         else:
             st.info("👆 Upload a Tableau workbook to begin analysis")
     
-    # Tab 3: Generate Application
+    # Tab 3: Field Mapping
     with tabs[2]:
-        st.header("Step 3: Generate Application")
+        st.header("Step 3: Field Mapping")
+        
+        if 'workbook_structure' in st.session_state:
+            display_field_mapping()
+        else:
+            st.info("👆 Upload and analyze a Tableau workbook to begin field mapping")
+    
+    # Tab 4: Generate Application
+    with tabs[3]:
+        st.header("Step 4: Generate Application")
         
         if not validate_data:
             st.info("💡 Validation is currently disabled. The app will be generated with all extracted calculations without verification.")
@@ -226,10 +237,10 @@ def main():
                 mime="application/zip"
             )
     
-    # Tab 4: Validation Results (only if validation is enabled)
-    if validate_data and len(tabs) > 3:
-        with tabs[3]:
-            st.header("Step 4: Data Validation")
+    # Tab 5: Validation Results (only if validation is enabled)
+    if validate_data and len(tabs) > 4:
+        with tabs[4]:
+            st.header("Step 5: Data Validation")
             
             if 'validation_results' in st.session_state:
                 display_validation_results(st.session_state.validation_results)
@@ -261,6 +272,12 @@ def process_workbook(twbx_file, data_file, reference_image, validate_data):
             # Store in session state
             st.session_state.workbook_structure = workbook_structure
             st.session_state.detected_data_sources = detected_sources
+            
+            # Initialize field mapper
+            field_mapper = FieldMapper()
+            field_mappings = field_mapper.extract_fields_from_workbook(workbook_structure)
+            st.session_state.field_mapper = field_mapper
+            st.session_state.field_mappings = field_mappings
             
             # Clean up
             temp_path.unlink()
@@ -415,6 +432,197 @@ def display_analysis_results(workbook: WorkbookStructure):
             st.write(f"Worksheets: {', '.join(dashboard.worksheets)}")
 
 
+def display_field_mapping():
+    """Display field mapping interface"""
+    st.markdown("**Configure how Tableau field names map to Python variables**")
+    st.markdown("Fields with invalid Python names will break the generated code. Fix these before proceeding.")
+    
+    if 'field_mapper' not in st.session_state or 'field_mappings' not in st.session_state:
+        st.error("Field mapping not initialized. Please re-analyze the workbook.")
+        return
+    
+    field_mapper = st.session_state.field_mapper
+    field_mappings = st.session_state.field_mappings
+    
+    # Get summary statistics
+    stats = field_mapper.get_summary_stats()
+    
+    # Display summary
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Fields", stats['total_fields'])
+    with col2:
+        st.metric("Valid Mappings", stats['valid_mappings'])
+    with col3:
+        st.metric("Invalid Mappings", stats['invalid_mappings'])
+    with col4:
+        st.metric("Validation Rate", f"{stats['validation_rate']:.1f}%")
+    
+    # Show field type breakdown
+    if stats['field_types']:
+        st.subheader("📊 Field Types")
+        type_cols = st.columns(len(stats['field_types']))
+        for i, (field_type, count) in enumerate(stats['field_types'].items()):
+            with type_cols[i]:
+                st.metric(field_type.title(), count)
+    
+    # Filter options
+    st.subheader("🔍 Filter Fields")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        show_type = st.selectbox(
+            "Show Field Type",
+            ["All"] + list(stats['field_types'].keys()),
+            key="field_type_filter"
+        )
+    
+    with col2:
+        show_status = st.selectbox(
+            "Show Status",
+            ["All", "Valid Only", "Invalid Only"],
+            key="field_status_filter"
+        )
+    
+    with col3:
+        search_term = st.text_input(
+            "Search Fields",
+            placeholder="Search by field name...",
+            key="field_search"
+        )
+    
+    # Filter mappings
+    filtered_mappings = field_mappings
+    
+    if show_type != "All":
+        filtered_mappings = [m for m in filtered_mappings if m.field_type == show_type]
+    
+    if show_status == "Valid Only":
+        filtered_mappings = [m for m in filtered_mappings if m.is_valid]
+    elif show_status == "Invalid Only":
+        filtered_mappings = [m for m in filtered_mappings if not m.is_valid]
+    
+    if search_term:
+        filtered_mappings = [m for m in filtered_mappings 
+                           if search_term.lower() in m.tableau_field.lower() or 
+                              search_term.lower() in m.display_name.lower()]
+    
+    # Display mappings table
+    st.subheader("🔧 Field Mappings")
+    
+    if not filtered_mappings:
+        st.info("No fields match the current filters.")
+        return
+    
+    # Create editable table
+    for i, mapping in enumerate(filtered_mappings):
+        status_icon = "❌" if not mapping.is_valid else "✅"
+        with st.expander(f"{status_icon} {mapping.display_name}", expanded=not mapping.is_valid):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**Tableau Field:**")
+                st.code(mapping.tableau_field, language="text")
+                
+                st.markdown("**Display Name:**")
+                st.write(mapping.display_name)
+                
+                st.markdown("**Field Type:**")
+                st.write(f"{mapping.field_type} ({mapping.data_type})")
+                
+                if not mapping.is_valid:
+                    st.error(f"**Error:** {mapping.validation_error}")
+            
+            with col2:
+                st.markdown("**Python Variable Name:**")
+                new_python_name = st.text_input(
+                    "Python Name",
+                    value=mapping.python_name,
+                    key=f"python_name_{i}",
+                    help="Must be a valid Python identifier"
+                )
+                
+                st.markdown("**Display Label:**")
+                new_display_label = st.text_input(
+                    "Display Label",
+                    value=mapping.display_label,
+                    key=f"display_label_{i}",
+                    help="Human-readable label for the UI"
+                )
+                
+                # Update button
+                if st.button(f"Update Mapping", key=f"update_{i}"):
+                    success = field_mapper.update_mapping(
+                        mapping.tableau_field,
+                        new_python_name,
+                        new_display_label
+                    )
+                    
+                    if success:
+                        st.success("Mapping updated successfully!")
+                        # Update session state
+                        st.session_state.field_mappings = field_mapper.get_all_mappings()
+                        st.rerun()
+                    else:
+                        current_mapping = field_mapper.get_mapping(mapping.tableau_field)
+                        if current_mapping and not current_mapping.is_valid:
+                            st.error(f"Update failed: {current_mapping.validation_error}")
+                        else:
+                            st.error("Update failed: Invalid Python name or name conflict")
+    
+    # Bulk operations
+    st.subheader("📦 Bulk Operations")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("🔄 Regenerate All Names"):
+            # Regenerate all Python names
+            for mapping in field_mapper.get_all_mappings():
+                new_python_name = field_mapper._generate_python_name(mapping.tableau_field)
+                field_mapper.update_mapping(mapping.tableau_field, new_python_name, mapping.display_label)
+            
+            st.session_state.field_mappings = field_mapper.get_all_mappings()
+            st.success("All Python names regenerated!")
+            st.rerun()
+    
+    with col2:
+        # Export mappings
+        if st.button("📥 Export Mappings"):
+            mappings_json = field_mapper.export_mappings()
+            st.download_button(
+                label="Download Mappings JSON",
+                data=mappings_json,
+                file_name=f"field_mappings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json"
+            )
+    
+    with col3:
+        # Import mappings
+        uploaded_mappings = st.file_uploader(
+            "📤 Import Mappings",
+            type=['json'],
+            key="import_mappings"
+        )
+        
+        if uploaded_mappings:
+            try:
+                mappings_data = uploaded_mappings.read().decode('utf-8')
+                if field_mapper.import_mappings(mappings_data):
+                    st.session_state.field_mappings = field_mapper.get_all_mappings()
+                    st.success("Mappings imported successfully!")
+                    st.rerun()
+                else:
+                    st.error("Failed to import mappings. Please check the file format.")
+            except Exception as e:
+                st.error(f"Error importing mappings: {e}")
+    
+    # Validation summary
+    if stats['invalid_mappings'] > 0:
+        st.warning(f"⚠️ {stats['invalid_mappings']} fields have invalid Python names. These must be fixed before generating the application.")
+    else:
+        st.success("✅ All field mappings are valid! You can proceed to generate the application.")
+
+
 def validate_calculations(workbook: WorkbookStructure, translated_formulas: dict):
     """Validate calculations against Snowflake"""
     try:
@@ -494,12 +702,23 @@ def generate_application(workbook: WorkbookStructure, framework: str, chart_libr
             # Get translated formulas from session state
             translated_formulas = st.session_state.get('translated_formulas', None)
             
+            # Get field mappings from session state
+            field_mapper = st.session_state.get('field_mapper', None)
+            
+            # Validate field mappings before generation
+            if field_mapper:
+                invalid_mappings = field_mapper.get_invalid_mappings()
+                if invalid_mappings:
+                    st.error(f"❌ Cannot generate application with {len(invalid_mappings)} invalid field mappings. Please fix them in the Field Mapping tab first.")
+                    return
+            
             # Generate the complete application
             generated_app = generator.generate_app(
                 workbook_structure=workbook,
                 chart_library=chart_library.lower(),
                 theme="default",
-                translated_formulas=translated_formulas
+                translated_formulas=translated_formulas,
+                field_mapper=field_mapper
             )
             
             # Create deployment package
