@@ -230,15 +230,23 @@ class SnowflakeValidator:
         
         available_columns = self.table_columns[table]
         
-        # Common column mappings
+        # Common column mappings - handle both quoted and unquoted versions
         column_mappings = {
-            '"Sales"': self._find_column(available_columns, ['SALES', 'SALE_AMOUNT', 'REVENUE']),
-            '"Profit"': self._find_column(available_columns, ['PROFIT', 'PROFIT_AMOUNT']),
-            '"Discount"': self._find_column(available_columns, ['DISCOUNT', 'DISCOUNT_RATE']),
-            '"Order ID"': self._find_column(available_columns, ['ORDER_ID', 'ORDERID', 'ORDER_NUMBER']),
-            '"Customer ID"': self._find_column(available_columns, ['CUSTOMER_ID', 'CUSTOMERID', 'CUST_ID']),
-            '"Segment"': self._find_column(available_columns, ['SEGMENT', 'CUSTOMER_SEGMENT']),
-            '"Region"': self._find_column(available_columns, ['REGION', 'SALES_REGION'])
+            '"Sales"': 'SALES',
+            '"Profit"': 'PROFIT', 
+            '"Discount"': 'DISCOUNT',
+            '"Order ID"': 'ORDER_ID',
+            '"Customer ID"': 'CUSTOMER_ID',
+            '"Segment"': 'SEGMENT',
+            '"Region"': 'REGION',
+            # Also handle without quotes
+            'Sales': 'SALES',
+            'Profit': 'PROFIT',
+            'Discount': 'DISCOUNT',
+            'Order ID': 'ORDER_ID',
+            'Customer ID': 'CUSTOMER_ID',
+            'Segment': 'SEGMENT',
+            'Region': 'REGION'
         }
         
         # Replace column names in expression
@@ -337,45 +345,45 @@ class SuperstoreMetrics:
     
     METRICS = {
         'total_sales': {
-            'formula': 'SUM("Sales")',
+            'formula': 'SUM(SALES)',
             'table': 'ORDERS',
             'expected_value': 2297200.86,  # From Tableau
             'tolerance': 0.01
         },
         'total_profit': {
-            'formula': 'SUM("Profit")',
+            'formula': 'SUM(PROFIT)',
             'table': 'ORDERS',
             'expected_value': 286397.02,  # From Tableau
             'tolerance': 0.01
         },
         'profit_ratio': {
-            'formula': 'SUM("Profit") / SUM("Sales")',
+            'formula': 'SUM(PROFIT) / SUM(SALES)',
             'table': 'ORDERS',
             'expected_value': 0.1246,  # From Tableau
             'tolerance': 0.001
         },
         'order_count': {
-            'formula': 'COUNT(DISTINCT "Order ID")',
+            'formula': 'COUNT(DISTINCT ORDER_ID)',
             'table': 'ORDERS',
             'expected_value': 5009,  # From Tableau
             'tolerance': 0
         },
         'customer_count': {
-            'formula': 'COUNT(DISTINCT "Customer ID")',
+            'formula': 'COUNT(DISTINCT CUSTOMER_ID)',
             'table': 'ORDERS',
             'expected_value': 793,  # From Tableau
             'tolerance': 0
         },
         'avg_discount': {
-            'formula': 'AVG("Discount")',
+            'formula': 'AVG(DISCOUNT)',
             'table': 'ORDERS',
             'expected_value': 0.1562,  # From Tableau
             'tolerance': 0.001
         },
         'sales_by_segment': {
-            'formula': 'SUM("Sales")',
+            'formula': 'SUM(SALES)',
             'table': 'ORDERS',
-            'group_by': ['"Segment"'],
+            'group_by': ['SEGMENT'],
             'expected_values': {
                 'Consumer': 1161401.73,
                 'Corporate': 706146.37,
@@ -384,9 +392,9 @@ class SuperstoreMetrics:
             'tolerance': 0.01
         },
         'sales_by_region': {
-            'formula': 'SUM("Sales")',
+            'formula': 'SUM(SALES)',
             'table': 'ORDERS',
-            'group_by': ['"Region"'],
+            'group_by': ['REGION'],
             'expected_values': {
                 'West': 725457.82,
                 'East': 678781.24,
