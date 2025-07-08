@@ -108,7 +108,11 @@ def main():
         {% for metric in key_metrics %}
         filtered_data = filter_manager.apply_filters(data, filters)
         {{ metric.name }}_value = calc_engine.calculate_{{ metric.name }}(filtered_data)
-        st.metric("{{ metric.display_name }}", f"{{ metric.format }}" % {{ metric.name }}_value)
+        try:
+            formatted_value = f"{{ metric.format }}".format({{ metric.name }}_value)
+        except (ValueError, TypeError):
+            formatted_value = str({{ metric.name }}_value)
+        st.metric("{{ metric.display_name }}", formatted_value)
         {% endfor %}
     
     # Apply filters
@@ -200,9 +204,10 @@ class CalculationEngine:
         \"\"\"
         try:
             # {{ calc.name }} calculation
-            {{ calc.python_code }}
+            {{ calc.python_code | indent(12) }}
             return result
         except Exception as e:
+            st.warning(f"Error calculating {{ calc.display_name }}: {str(e)}")
             return 0  # Default value on error
     {% endfor %}
     
@@ -263,13 +268,14 @@ class FilterManager:
     def generate_app(self, 
                     workbook_structure: Any,
                     chart_library: str = "plotly",
-                    theme: str = "default") -> GeneratedApp:
+                    theme: str = "default",
+                    translated_formulas: Optional[Dict[str, Any]] = None) -> GeneratedApp:
         """Generate complete Streamlit application"""
         
         logger.info("Generating Streamlit application...")
         
         # Extract dashboard information
-        dashboard_info = self._extract_dashboard_info(workbook_structure)
+        dashboard_info = self._extract_dashboard_info(workbook_structure, translated_formulas)
         
         # Generate main app file
         main_file = self._generate_main_file(dashboard_info, chart_library, theme)
@@ -295,7 +301,7 @@ class FilterManager:
             documentation=documentation
         )
     
-    def _extract_dashboard_info(self, workbook_structure: Any) -> Dict[str, Any]:
+    def _extract_dashboard_info(self, workbook_structure: Any, translated_formulas: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Extract dashboard information from workbook structure"""
         
         # Get first dashboard (assuming single dashboard for now)
@@ -313,12 +319,27 @@ class FilterManager:
         # Extract calculations
         calculations = []
         for calc_name, calc in workbook_structure.calculations.items():
+            # Get translated formula if available
+            if translated_formulas and calc_name in translated_formulas and translated_formulas[calc_name]:
+                translation = translated_formulas[calc_name]
+                python_code = translation.pandas_expression
+                # Add proper implementation with data handling
+                if translation.is_window_function:
+                    python_code = f"# Window function\n        {python_code}"
+                elif translation.requires_aggregation:
+                    python_code = f"# Requires aggregation\n        result = data.groupby(data.index).apply(lambda x: {python_code}).reset_index(drop=True)"
+                else:
+                    python_code = f"result = {python_code}"
+            else:
+                # Fallback to a basic implementation
+                python_code = self._generate_fallback_calculation(calc)
+            
             calculations.append({
                 'name': calc_name.replace(' ', '_').replace('-', '_').lower(),
                 'display_name': calc_name,
                 'original_formula': calc.formula,
                 'description': f"Calculation for {calc_name}",
-                'python_code': f"result = {calc.formula}  # TODO: Implement translation",
+                'python_code': python_code,
                 'dependencies': calc.dependencies
             })
         
@@ -329,13 +350,36 @@ class FilterManager:
             {'name': 'category', 'display_name': 'Category', 'column': 'Category'},
         ]
         
-        # Key metrics
-        key_metrics = [
-            {'name': 'total_sales', 'display_name': 'Total Sales', 'format': '${:,.0f}'},
-            {'name': 'total_profit', 'display_name': 'Total Profit', 'format': '${:,.0f}'},
-            {'name': 'profit_margin', 'display_name': 'Profit Margin', 'format': '{:.1%}'},
-            {'name': 'order_count', 'display_name': 'Orders', 'format': '{:,.0f}'},
-        ]
+        # Key metrics - dynamically generate from calculations
+        key_metrics = []
+        metric_count = 0
+        for calc in calculations[:4]:  # Take first 4 calculations as key metrics
+            metric_count += 1
+            # Determine format based on calculation name
+            if 'profit' in calc['display_name'].lower() and 'margin' in calc['display_name'].lower():
+                format_str = '{:.1%}'
+            elif 'count' in calc['display_name'].lower() or 'quantity' in calc['display_name'].lower():
+                format_str = '{:,.0f}'
+            elif 'sales' in calc['display_name'].lower() or 'profit' in calc['display_name'].lower() or 'revenue' in calc['display_name'].lower():
+                format_str = '${:,.0f}'
+            else:
+                format_str = '{:,.2f}'
+            
+            key_metrics.append({
+                'name': calc['name'],
+                'display_name': calc['display_name'],
+                'format': format_str
+            })
+        
+        # If we have fewer than 4 calculations, add some default metrics
+        if metric_count < 4:
+            default_metrics = [
+                {'name': 'total_sales', 'display_name': 'Total Sales', 'format': '${:,.0f}'},
+                {'name': 'total_profit', 'display_name': 'Total Profit', 'format': '${:,.0f}'},
+                {'name': 'profit_margin', 'display_name': 'Profit Margin', 'format': '{:.1%}'},
+                {'name': 'order_count', 'display_name': 'Orders', 'format': '{:,.0f}'},
+            ]
+            key_metrics.extend(default_metrics[metric_count:4])
         
         return {
             'name': dashboard_name,
@@ -347,6 +391,37 @@ class FilterManager:
             'key_metrics': key_metrics,
             'data_query': self._generate_data_query(workbook_structure)
         }
+    
+    def _generate_fallback_calculation(self, calc: Any) -> str:
+        """Generate fallback calculation when translation is not available"""
+        # Try to generate a basic Python implementation based on common patterns
+        formula = calc.formula.upper()
+        
+        if 'SUM(' in formula:
+            field = calc.formula[calc.formula.find('(')+1:calc.formula.rfind(')')].strip('[]"')
+            return f"result = data['{field}'].sum()"
+        elif 'AVG(' in formula or 'AVERAGE(' in formula:
+            field = calc.formula[calc.formula.find('(')+1:calc.formula.rfind(')')].strip('[]"')
+            return f"result = data['{field}'].mean()"
+        elif 'COUNT(' in formula:
+            field = calc.formula[calc.formula.find('(')+1:calc.formula.rfind(')')].strip('[]"')
+            return f"result = data['{field}'].count()"
+        elif 'MAX(' in formula:
+            field = calc.formula[calc.formula.find('(')+1:calc.formula.rfind(')')].strip('[]"')
+            return f"result = data['{field}'].max()"
+        elif 'MIN(' in formula:
+            field = calc.formula[calc.formula.find('(')+1:calc.formula.rfind(')')].strip('[]"')
+            return f"result = data['{field}'].min()"
+        elif '/' in formula and calc.calculation_type == 'basic':
+            # Handle simple division like profit margin
+            parts = calc.formula.split('/')
+            if len(parts) == 2:
+                num = parts[0].strip().strip('[]"')
+                den = parts[1].strip().strip('[]"')
+                return f"result = data['{num}'] / data['{den}']"
+        else:
+            # Default implementation
+            return f"# TODO: Implement calculation for: {calc.formula}\n        result = 0"
     
     def _generate_main_file(self, dashboard_info: Dict[str, Any], chart_library: str, theme: str) -> str:
         """Generate main Streamlit app file"""
@@ -367,49 +442,164 @@ class FilterManager:
     def _generate_dashboard_layout(self, dashboard_info: Dict[str, Any], chart_library: str) -> str:
         """Generate dashboard layout code"""
         
-        layout_code = """
+        # Create tabs based on worksheets
+        worksheets = dashboard_info.get('worksheets', [])
+        if not worksheets:
+            # Default layout if no worksheets
+            return self._generate_default_layout(chart_library)
+        
+        # Generate tab names and content
+        tab_names = []
+        tab_contents = []
+        
+        for i, worksheet in enumerate(worksheets[:5]):  # Limit to 5 tabs
+            tab_names.append(f"📊 {worksheet}")
+            tab_contents.append(f"tab{i+1}")
+        
+        # Add a details tab
+        tab_names.append("🔍 Details")
+        tab_contents.append(f"tab{len(worksheets)+1}")
+        
+        tabs_str = ', '.join(tab_contents)
+        tab_names_str = ', '.join([f'"{name}"' for name in tab_names])
+        
+        layout_code = f"""
     # Main dashboard content
-    tab1, tab2, tab3 = st.tabs(["📊 Overview", "📈 Trends", "🔍 Details"])
+    {tabs_str} = st.tabs([{tab_names_str}])
+    """
+        
+        # Generate content for each worksheet tab
+        for i, worksheet in enumerate(worksheets[:5]):
+            layout_code += f"""
+    with tab{i+1}:
+        st.subheader("{worksheet}")
+        
+        # Calculate metrics for this worksheet
+        worksheet_metrics = calc_engine.calculate_all_metrics(filtered_data)
+        
+        # Display metrics
+        metric_cols = st.columns(4)
+        for idx, (metric_name, metric_value) in enumerate(list(worksheet_metrics.items())[:4]):
+            with metric_cols[idx % 4]:
+                try:
+                    formatted_value = f"{{float(metric_value):,.2f}}"
+                except (ValueError, TypeError):
+                    formatted_value = str(metric_value)
+                st.metric(metric_name.replace('_', ' ').title(), formatted_value)
+        
+        # Create visualizations based on available data
+        if filtered_data.shape[0] > 0:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Dynamic chart based on data
+                numeric_cols = filtered_data.select_dtypes(include=['float64', 'int64']).columns.tolist()
+                categorical_cols = filtered_data.select_dtypes(include=['object']).columns.tolist()
+                
+                if len(categorical_cols) > 0 and len(numeric_cols) > 0:
+                    cat_col = categorical_cols[0]
+                    num_col = numeric_cols[0]
+                    chart_data = filtered_data.groupby(cat_col)[num_col].sum().reset_index()
+                    fig = px.bar(chart_data, x=cat_col, y=num_col, title=f"{{num_col}} by {{cat_col}}")
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                if len(numeric_cols) >= 2:
+                    # Scatter plot with first two numeric columns
+                    fig2 = px.scatter(filtered_data, x=numeric_cols[0], y=numeric_cols[1], 
+                                     title=f"{{numeric_cols[0]}} vs {{numeric_cols[1]}}")
+                    st.plotly_chart(fig2, use_container_width=True)
+    """
+        
+        # Add details tab
+        layout_code += f"""
+    with tab{len(worksheets)+1}:
+        st.subheader("Detailed Data")
+        
+        # Show calculated fields
+        with st.expander("📐 Calculated Fields"):
+            calc_df = pd.DataFrame([
+                {{'Calculation': name, 'Value': value}} 
+                for name, value in calc_engine.calculate_all_metrics(filtered_data).items()
+            ])
+            st.dataframe(calc_df, use_container_width=True)
+        
+        # Show raw data
+        st.subheader("📊 Raw Data")
+        st.dataframe(filtered_data, use_container_width=True, height=400)
+        
+        # Download button
+        csv = filtered_data.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Data as CSV",
+            data=csv,
+            file_name=f"dashboard_data_{{datetime.now().strftime('%Y%m%d')}}.csv",
+            mime="text/csv"
+        )
+"""
+        
+        return layout_code
+    
+    def _generate_default_layout(self, chart_library: str) -> str:
+        """Generate default layout when no worksheets are found"""
+        return """
+    # Main dashboard content
+    tab1, tab2, tab3 = st.tabs(["📊 Overview", "📈 Analysis", "🔍 Details"])
     
     with tab1:
+        st.subheader("Overview")
+        
+        # Display key metrics
+        metric_cols = st.columns(4)
+        metrics = calc_engine.calculate_all_metrics(filtered_data)
+        
+        for idx, (metric_name, metric_value) in enumerate(list(metrics.items())[:4]):
+            with metric_cols[idx]:
+                try:
+                    formatted_value = f"{float(metric_value):,.2f}"
+                except (ValueError, TypeError):
+                    formatted_value = str(metric_value)
+                st.metric(metric_name.replace('_', ' ').title(), formatted_value)
+        
         # Overview charts
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("Sales by Region")
-            sales_by_region = filtered_data.groupby('Region')['Sales'].sum().reset_index()
-            fig1 = px.bar(sales_by_region, x='Region', y='Sales', 
-                         title='Sales by Region')
-            st.plotly_chart(fig1, use_container_width=True)
+            # Dynamic chart based on available columns
+            numeric_cols = filtered_data.select_dtypes(include=['float64', 'int64']).columns.tolist()
+            categorical_cols = filtered_data.select_dtypes(include=['object']).columns.tolist()
+            
+            if categorical_cols and numeric_cols:
+                chart_data = filtered_data.groupby(categorical_cols[0])[numeric_cols[0]].sum().reset_index()
+                fig1 = px.bar(chart_data, x=categorical_cols[0], y=numeric_cols[0])
+                st.plotly_chart(fig1, use_container_width=True)
         
         with col2:
-            st.subheader("Profit by Segment")
-            profit_by_segment = filtered_data.groupby('Segment')['Profit'].sum().reset_index()
-            fig2 = px.pie(profit_by_segment, values='Profit', names='Segment',
-                         title='Profit Distribution by Segment')
-            st.plotly_chart(fig2, use_container_width=True)
+            if len(categorical_cols) > 0 and len(numeric_cols) > 0:
+                fig2 = px.pie(filtered_data, values=numeric_cols[0], names=categorical_cols[0])
+                st.plotly_chart(fig2, use_container_width=True)
     
     with tab2:
-        # Trend analysis
-        st.subheader("Sales Trends")
+        st.subheader("Analysis")
         
-        # Monthly sales trend
-        if 'Order Date' in filtered_data.columns:
-            monthly_sales = filtered_data.groupby(
-                filtered_data['Order Date'].dt.to_period('M')
-            )['Sales'].sum().reset_index()
-            monthly_sales['Order Date'] = monthly_sales['Order Date'].astype(str)
-            
-            fig3 = px.line(monthly_sales, x='Order Date', y='Sales',
-                          title='Monthly Sales Trend')
-            st.plotly_chart(fig3, use_container_width=True)
+        # Time series analysis if date column exists
+        date_cols = filtered_data.select_dtypes(include=['datetime64']).columns.tolist()
+        if date_cols:
+            numeric_cols = filtered_data.select_dtypes(include=['float64', 'int64']).columns.tolist()
+            if numeric_cols:
+                monthly_data = filtered_data.groupby(
+                    filtered_data[date_cols[0]].dt.to_period('M')
+                )[numeric_cols[0]].sum().reset_index()
+                monthly_data[date_cols[0]] = monthly_data[date_cols[0]].astype(str)
+                
+                fig3 = px.line(monthly_data, x=date_cols[0], y=numeric_cols[0],
+                              title=f"Monthly {numeric_cols[0]} Trend")
+                st.plotly_chart(fig3, use_container_width=True)
     
     with tab3:
-        # Detailed data
         st.subheader("Detailed Data")
         st.dataframe(filtered_data, use_container_width=True, height=400)
         
-        # Download button
         csv = filtered_data.to_csv(index=False)
         st.download_button(
             label="📥 Download Data as CSV",
@@ -418,8 +608,6 @@ class FilterManager:
             mime="text/csv"
         )
 """
-        
-        return layout_code
     
     def _generate_supporting_files(self, workbook_structure: Any, dashboard_info: Dict[str, Any]) -> Dict[str, str]:
         """Generate supporting files"""

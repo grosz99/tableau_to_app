@@ -100,8 +100,8 @@ def main():
         
         validate_data = st.checkbox(
             "Validate with Snowflake",
-            value=True,
-            help="Compare calculations against source data"
+            value=False,
+            help="Optional: Compare calculations against source data"
         )
         
         st.divider()
@@ -110,13 +110,16 @@ def main():
         st.info(
             "**Current Prototype (v1.0)**\n\n"
             "✅ **Streamlit Generation**: Extract formulas → Generate Streamlit apps\n"
-            "✅ **Data Validation**: Compare against Snowflake source data\n"
+            "✅ **Data Validation**: Optional comparison against Snowflake source data\n"
             "✅ **AI Translation**: Tableau formulas → Python/Pandas\n\n"
             "🚧 **Coming Soon**: React and Tableau output options"
         )
     
     # Main content
-    tabs = st.tabs(["📁 Upload Files", "🔍 Analysis", "🚀 Generate", "✅ Validation"])
+    if validate_data:
+        tabs = st.tabs(["📁 Upload Files", "🔍 Analysis", "🚀 Generate", "✅ Validation"])
+    else:
+        tabs = st.tabs(["📁 Upload Files", "🔍 Analysis", "🚀 Generate"])
     
     # Tab 1: Upload Files
     with tabs[0]:
@@ -181,6 +184,9 @@ def main():
     with tabs[2]:
         st.header("Step 3: Generate Application")
         
+        if not validate_data:
+            st.info("💡 Validation is currently disabled. The app will be generated with all extracted calculations without verification.")
+        
         if 'workbook_structure' in st.session_state:
             if output_framework == "Streamlit (Current)":
                 if st.button("🚀 Generate Streamlit App", type="primary", use_container_width=True):
@@ -204,15 +210,30 @@ def main():
                     )
         else:
             st.info("👆 Complete workbook analysis first")
+            
+        # Show generated app if available
+        if 'generated_app' in st.session_state:
+            st.subheader("📦 Generated Application")
+            st.success("✅ Application generated successfully!")
+            
+            # Download button
+            zip_data = st.session_state.generated_app
+            st.download_button(
+                label="📥 Download Complete Application Package",
+                data=zip_data,
+                file_name="streamlit_dashboard.zip",
+                mime="application/zip"
+            )
     
-    # Tab 4: Validation Results
-    with tabs[3]:
-        st.header("Step 4: Data Validation")
-        
-        if 'validation_results' in st.session_state:
-            display_validation_results(st.session_state.validation_results)
-        else:
-            st.info("👆 Generate application to see validation results")
+    # Tab 4: Validation Results (only if validation is enabled)
+    if validate_data and len(tabs) > 3:
+        with tabs[3]:
+            st.header("Step 4: Data Validation")
+            
+            if 'validation_results' in st.session_state:
+                display_validation_results(st.session_state.validation_results)
+            else:
+                st.info("👆 Validation will be performed after generating the application")
 
 
 def process_workbook(twbx_file, data_file, reference_image, validate_data):
@@ -420,25 +441,42 @@ def generate_application(workbook: WorkbookStructure, framework: str, chart_libr
     """Generate the output application"""
     try:
         with st.spinner(f"🚀 Generating {framework} application..."):
-            # For now, show a preview
-            st.info("🚧 Application generation in progress...")
+            # Initialize the generator
+            generator = StreamlitGenerator()
             
-            # Generate sample code
-            sample_code = generate_sample_streamlit_code(workbook, chart_library)
+            # Get translated formulas from session state
+            translated_formulas = st.session_state.get('translated_formulas', None)
             
-            st.subheader("📝 Generated Code Preview")
-            st.code(sample_code, language="python")
-            
-            # Download button
-            st.download_button(
-                label="📥 Download Generated App",
-                data=sample_code,
-                file_name="generated_dashboard.py",
-                mime="text/plain"
+            # Generate the complete application
+            generated_app = generator.generate_app(
+                workbook_structure=workbook,
+                chart_library=chart_library.lower(),
+                theme="default",
+                translated_formulas=translated_formulas
             )
+            
+            # Create deployment package
+            zip_data = generator.create_deployment_package(generated_app)
+            
+            # Store in session state
+            st.session_state.generated_app = zip_data
+            
+            st.success("✅ Application generated successfully!")
+            
+            # Show preview of main file
+            st.subheader("📝 Generated Code Preview (app.py)")
+            st.code(generated_app.main_file[:2000] + "\n...\n# [Truncated for preview]", language="python")
+            
+            # Show generated files
+            st.subheader("📂 Generated Files")
+            files_list = ["app.py"] + list(generated_app.supporting_files.keys()) + ["requirements.txt", "README.md"]
+            st.write("The following files have been generated:")
+            for file in files_list:
+                st.write(f"- {file}")
             
     except Exception as e:
         st.error(f"❌ Generation error: {str(e)}")
+        st.code(traceback.format_exc())
 
 
 def generate_sample_streamlit_code(workbook: WorkbookStructure, chart_library: str) -> str:
