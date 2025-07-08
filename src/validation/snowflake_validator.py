@@ -32,7 +32,10 @@ class SnowflakeValidator:
     def __init__(self):
         self.connection = None
         self.engine = None
+        self.available_tables = []
+        self.table_columns = {}
         self._connect()
+        self._discover_schema()
         
     def _connect(self):
         """Establish connection to Snowflake"""
@@ -64,6 +67,36 @@ class SnowflakeValidator:
         except Exception as e:
             logger.error(f"Failed to connect to Snowflake: {str(e)}")
             raise
+    
+    def _discover_schema(self):
+        """Discover available tables and columns"""
+        if not self.connection:
+            return
+            
+        try:
+            cursor = self.connection.cursor()
+            
+            # Get all tables in current schema
+            cursor.execute("SHOW TABLES")
+            tables = cursor.fetchall()
+            self.available_tables = [table[1] for table in tables]  # table name is in second column
+            
+            # Get columns for each table
+            for table in self.available_tables:
+                cursor.execute(f"DESCRIBE TABLE {table}")
+                columns = cursor.fetchall()
+                self.table_columns[table] = [col[0] for col in columns]  # column name is first
+            
+            logger.info(f"Discovered {len(self.available_tables)} tables: {self.available_tables}")
+            
+        except Exception as e:
+            logger.warning(f"Schema discovery failed: {e}")
+            # Fallback to common table names
+            self.available_tables = ['ORDERS', 'SUPERSTORE', 'SALES_DATA']
+            
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
     
     def get_source_data(self, table_name: str, limit: Optional[int] = None) -> pd.DataFrame:
         """Retrieve source data from Snowflake"""
@@ -148,11 +181,20 @@ class SnowflakeValidator:
         return results
     
     def _build_metric_sql(self, metric_info: Dict) -> str:
-        """Build SQL query from metric definition"""
+        """Build SQL query from metric definition with dynamic table/column mapping"""
         formula = metric_info.get('formula', '')
         table = metric_info.get('table', '')
         filters = metric_info.get('filters', [])
         group_by = metric_info.get('group_by', [])
+        
+        # Auto-detect table if not specified or doesn't exist
+        if not table or table not in self.available_tables:
+            table = self._find_best_table()
+        
+        # Map column names to actual schema
+        formula = self._map_column_names(formula, table)
+        mapped_filters = [self._map_column_names(f, table) for f in filters]
+        mapped_group_by = [self._map_column_names(gb, table) for gb in group_by]
         
         # Start building query
         sql = f"SELECT {formula}"
@@ -160,14 +202,64 @@ class SnowflakeValidator:
         if table:
             sql += f" FROM {table}"
         
-        if filters:
-            where_clause = " AND ".join(filters)
+        if mapped_filters:
+            where_clause = " AND ".join(mapped_filters)
             sql += f" WHERE {where_clause}"
         
-        if group_by:
-            sql += f" GROUP BY {', '.join(group_by)}"
+        if mapped_group_by:
+            sql += f" GROUP BY {', '.join(mapped_group_by)}"
         
         return sql
+    
+    def _find_best_table(self) -> str:
+        """Find the most likely table containing sales data"""
+        # Priority order for common table names
+        candidates = ['ORDERS', 'SUPERSTORE', 'SALES_DATA', 'SALES', 'ORDER_DATA']
+        
+        for candidate in candidates:
+            if candidate in self.available_tables:
+                return candidate
+        
+        # Return first available table as fallback
+        return self.available_tables[0] if self.available_tables else 'ORDERS'
+    
+    def _map_column_names(self, expression: str, table: str) -> str:
+        """Map quoted column names to actual column names in the table"""
+        if table not in self.table_columns:
+            return expression
+        
+        available_columns = self.table_columns[table]
+        
+        # Common column mappings
+        column_mappings = {
+            '"Sales"': self._find_column(available_columns, ['SALES', 'SALE_AMOUNT', 'REVENUE']),
+            '"Profit"': self._find_column(available_columns, ['PROFIT', 'PROFIT_AMOUNT']),
+            '"Discount"': self._find_column(available_columns, ['DISCOUNT', 'DISCOUNT_RATE']),
+            '"Order ID"': self._find_column(available_columns, ['ORDER_ID', 'ORDERID', 'ORDER_NUMBER']),
+            '"Customer ID"': self._find_column(available_columns, ['CUSTOMER_ID', 'CUSTOMERID', 'CUST_ID']),
+            '"Segment"': self._find_column(available_columns, ['SEGMENT', 'CUSTOMER_SEGMENT']),
+            '"Region"': self._find_column(available_columns, ['REGION', 'SALES_REGION'])
+        }
+        
+        # Replace column names in expression
+        result = expression
+        for old_col, new_col in column_mappings.items():
+            if old_col in result and new_col:
+                result = result.replace(old_col, new_col)
+        
+        return result
+    
+    def _find_column(self, available_columns: List[str], candidates: List[str]) -> Optional[str]:
+        """Find the best matching column name"""
+        for candidate in candidates:
+            # Exact match
+            if candidate in available_columns:
+                return candidate
+            # Case-insensitive match
+            for col in available_columns:
+                if col.upper() == candidate.upper():
+                    return col
+        return None
     
     def compare_dataframes(self, 
                           tableau_df: pd.DataFrame,
